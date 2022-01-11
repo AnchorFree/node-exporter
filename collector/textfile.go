@@ -64,6 +64,17 @@ func NewTextFileCollector(logger log.Logger) (Collector, error) {
 	return c, nil
 }
 
+type metricWrapper struct {
+	prometheus.Metric
+	ts *int64
+}
+
+func (mw *metricWrapper) Write(m *dto.Metric) error {
+	err := mw.Metric.Write(m)
+	m.TimestampMs = mw.ts
+	return err
+}
+
 func convertMetricFamily(metricFamily *dto.MetricFamily, ch chan<- prometheus.Metric, logger log.Logger) {
 	var valType prometheus.ValueType
 	var val float64
@@ -79,9 +90,9 @@ func convertMetricFamily(metricFamily *dto.MetricFamily, ch chan<- prometheus.Me
 	}
 
 	for _, metric := range metricFamily.Metric {
-		if metric.TimestampMs != nil {
-			level.Warn(logger).Log("msg", "Ignoring unsupported custom timestamp on textfile collector metric", "metric", metric)
-		}
+		// if metric.TimestampMs != nil {
+		// level.Warn(logger).Log("msg", "Ignoring unsupported custom timestamp on textfile collector metric", "metric", metric)
+		// }
 
 		labels := metric.GetLabel()
 		var names []string
@@ -124,7 +135,7 @@ func convertMetricFamily(metricFamily *dto.MetricFamily, ch chan<- prometheus.Me
 			for _, q := range metric.Summary.Quantile {
 				quantiles[q.GetQuantile()] = q.GetValue()
 			}
-			ch <- prometheus.MustNewConstSummary(
+			wrapper := &metricWrapper{prometheus.MustNewConstSummary(
 				prometheus.NewDesc(
 					*metricFamily.Name,
 					metricFamily.GetHelp(),
@@ -133,13 +144,14 @@ func convertMetricFamily(metricFamily *dto.MetricFamily, ch chan<- prometheus.Me
 				metric.Summary.GetSampleCount(),
 				metric.Summary.GetSampleSum(),
 				quantiles, values...,
-			)
+			), metric.TimestampMs}
+			ch <- wrapper
 		case dto.MetricType_HISTOGRAM:
 			buckets := map[float64]uint64{}
 			for _, b := range metric.Histogram.Bucket {
 				buckets[b.GetUpperBound()] = b.GetCumulativeCount()
 			}
-			ch <- prometheus.MustNewConstHistogram(
+			wrapper := &metricWrapper{prometheus.MustNewConstHistogram(
 				prometheus.NewDesc(
 					*metricFamily.Name,
 					metricFamily.GetHelp(),
@@ -148,19 +160,21 @@ func convertMetricFamily(metricFamily *dto.MetricFamily, ch chan<- prometheus.Me
 				metric.Histogram.GetSampleCount(),
 				metric.Histogram.GetSampleSum(),
 				buckets, values...,
-			)
+			), metric.TimestampMs}
+			ch <- wrapper
 		default:
 			panic("unknown metric type")
 		}
 		if metricType == dto.MetricType_GAUGE || metricType == dto.MetricType_COUNTER || metricType == dto.MetricType_UNTYPED {
-			ch <- prometheus.MustNewConstMetric(
+			wrapper := &metricWrapper{prometheus.MustNewConstMetric(
 				prometheus.NewDesc(
 					*metricFamily.Name,
 					metricFamily.GetHelp(),
 					names, nil,
 				),
 				valType, val, values...,
-			)
+			), metric.TimestampMs}
+			ch <- wrapper
 		}
 	}
 }
@@ -258,9 +272,9 @@ func (c *textFileCollector) processFile(dir, name string, ch chan<- prometheus.M
 		return nil, fmt.Errorf("failed to parse textfile data from %q: %w", path, err)
 	}
 
-	if hasTimestamps(families) {
-		return nil, fmt.Errorf("textfile %q contains unsupported client-side timestamps, skipping entire file", path)
-	}
+	// if hasTimestamps(families) {
+	// return nil, fmt.Errorf("textfile %q contains unsupported client-side timestamps, skipping entire file", path)
+	// }
 
 	for _, mf := range families {
 		if mf.Help == nil {
